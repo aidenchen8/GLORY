@@ -80,12 +80,6 @@ def load_pretrain_emb(embedding_file_path, target_dict, target_dim):
     return embedding_matrix
 
 
-def reduce_mean(result, nprocs):
-    rt = result.detach()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= nprocs
-    return rt
-
 
 def pretty_print(d, indent=0):
     for key, value in d.items():

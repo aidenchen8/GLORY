@@ -109,19 +109,11 @@ def val(model, local_rank, cfg):
         results = pool.map(cal_metric, tasks)
     val_auc, val_mrr, val_ndcg5, val_ndcg10 = np.array(results).T
 
-    # barrier
-    torch.distributed.barrier()
-
-    reduced_auc = reduce_mean(torch.tensor(np.nanmean(val_auc)).float().to(local_rank), cfg.gpu_num)
-    reduced_mrr = reduce_mean(torch.tensor(np.nanmean(val_mrr)).float().to(local_rank), cfg.gpu_num)
-    reduced_ndcg5 = reduce_mean(torch.tensor(np.nanmean(val_ndcg5)).float().to(local_rank), cfg.gpu_num)
-    reduced_ndcg10 = reduce_mean(torch.tensor(np.nanmean(val_ndcg10)).float().to(local_rank), cfg.gpu_num)
-
     res = {
-        "auc": reduced_auc.item(),
-        "mrr": reduced_mrr.item(),
-        "ndcg5": reduced_ndcg5.item(),
-        "ndcg10": reduced_ndcg10.item(),
+        "auc": np.nanmean(val_auc),
+        "mrr": np.nanmean(val_mrr),
+        "ndcg5": np.nanmean(val_ndcg5),
+        "ndcg10": np.nanmean(val_ndcg10),
     }
     
     return res
@@ -130,16 +122,12 @@ def val(model, local_rank, cfg):
 def main_worker(local_rank, cfg):
     # -----------------------------------------Environment Initial
     seed_everything(cfg.seed)
-    dist.init_process_group(backend='nccl',
-                            init_method='tcp://127.0.0.1:23456',
-                            world_size=cfg.gpu_num,
-                            rank=local_rank)
 
     # -----------------------------------------Dataset & Model Load
     num_training_steps = int(cfg.num_epochs * cfg.dataset.pos_count / (cfg.batch_size * cfg.accumulation_steps))
     num_warmup_steps = int(num_training_steps * cfg.warmup_ratio + 1)
-    train_dataloader = load_data(cfg, mode='train', local_rank=local_rank)
-    model = load_model(cfg).to(local_rank)
+    train_dataloader = load_data(cfg, mode='train')
+    model = load_model(cfg).to('cuda')
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.optimizer.lr)
 
     lr_lambda = lambda step: 1.0 if step > num_warmup_steps else step / num_warmup_steps
@@ -152,7 +140,7 @@ def main_worker(local_rank, cfg):
         model.load_state_dict(checkpoint['model_state_dict'])  # After Distributed
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
     optimizer.zero_grad(set_to_none=True)
     scaler = amp.GradScaler()
 
@@ -168,16 +156,13 @@ def main_worker(local_rank, cfg):
     train(model, optimizer, scaler, scheduler, train_dataloader, local_rank, cfg, early_stopping)
 
 
-    if local_rank == 0:
-        wandb.finish()
-
 
 @hydra.main(version_base="1.2", config_path=os.path.join(get_root(), "configs"), config_name="small")
 def main(cfg: DictConfig):
     seed_everything(cfg.seed)
-    cfg.gpu_num = torch.cuda.device_count()
+    cfg.gpu_num = 1
     prepare_preprocessed_data(cfg)
-    mp.spawn(main_worker, nprocs=cfg.gpu_num, args=(cfg,))
+    main_worker(0, cfg)
 
 
 if __name__ == "__main__":
